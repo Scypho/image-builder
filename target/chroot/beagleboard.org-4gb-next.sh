@@ -24,7 +24,7 @@ export LC_ALL=C
 
 chromium_release="chromium-33.0.1750.117"
 u_boot_release="v2014.10"
-cloud9_pkg="c9v3-beaglebone-build-2-20140414.tar.gz"
+cloud9_pkg="c9v3_3.0.1-git20140211-build.tar.xz"
 
 #contains: rfs_username, release_date
 if [ -f /etc/rcn-ee.conf ] ; then
@@ -306,27 +306,38 @@ install_node_pkgs () {
 		sync
 
 		cd /opt/
-		mkdir -p /opt/cloud9/
+		mkdir -p /opt/cloud9/build/ || true
 		wget https://rcn-ee.net/pkgs/c9v3/${cloud9_pkg}
 		if [ -f /opt/${cloud9_pkg} ] ; then
-			tar xf ${cloud9_pkg} -C /opt/cloud9/
+			tar xf ${cloud9_pkg} -C /opt/cloud9/build/
 			rm -rf ${cloud9_pkg} || true
-
-			#Fixme: archive structure changed in c9v3-beaglebone-build-2-20140414...
-			if [ -d /opt/cloud9/c9v3-beaglebone-build-2-20140414 ] ; then
-				mv /opt/cloud9/c9v3-beaglebone-build-2-20140414/* /opt/cloud9/
-				rm -rf /opt/cloud9/c9v3-beaglebone-build-2-20140414 || true
-			fi
 
 			chown -R ${rfs_username}:${rfs_username} /opt/cloud9/
 
-			if [ -f /opt/cloud9/install.sh ] ; then
-				cd /opt/cloud9/
-				/bin/sh ./install.sh || true
-				echo "cloud9: jessie"
-				systemctl enable cloud9.socket || true
-				cd -
-			fi
+			wfile="/etc/default/cloud9"
+			echo "NODE_PATH=/usr/local/lib/node_modules" > ${wfile}
+			echo "HOME=/root" >> ${wfile}
+			echo "PORT=3000" >> ${wfile}
+
+			wfile="/lib/systemd/system/cloud9.socket"
+			echo "[Socket]" > ${wfile}
+			echo "ListenStream=3000" >> ${wfile}
+			echo "" >> ${wfile}
+			echo "[Install]" >> ${wfile}
+			echo "WantedBy=sockets.target" >> ${wfile}
+
+			wfile="/lib/systemd/system/cloud9.service"
+			echo "[Unit]" > ${wfile}
+			echo "Description=Cloud9 IDE" >> ${wfile}
+			echo "ConditionPathExists=|/var/lib/cloud9" >> ${wfile}
+			echo "" >> ${wfile}
+			echo "[Service]" >> ${wfile}
+			echo "WorkingDirectory=/opt/cloud9/build/standalonebuild" >> ${wfile}
+			echo "EnvironmentFile=/etc/default/cloud9" >> ${wfile}
+			echo "ExecStart=/usr/bin/node server.js --packed -w /var/lib/cloud9" >> ${wfile}
+			echo "SyslogIdentifier=cloud9ide" >> ${wfile}
+
+			systemctl enable cloud9.socket || true
 		fi
 
 		git_repo="https://github.com/beagleboard/bone101"
