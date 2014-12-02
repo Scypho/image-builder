@@ -25,6 +25,8 @@ host_arch="$(uname -m)"
 time=$(date +%Y-%m-%d)
 OIB_DIR="$(dirname "$( cd "$(dirname "$0")" ; pwd -P )" )"
 
+abi=aa
+
 . ${DIR}/.project
 
 check_defines () {
@@ -232,10 +234,25 @@ if [ "x${deb_distribution}" = "xdebian" ] ; then
 	#generic apt.conf tweaks for flash/mmc devices to save on wasted space...
 	sudo mkdir -p ${tempdir}/etc/apt/apt.conf.d/ || true
 
+	#apt: emulate apt-get clean:
+	echo '#Custom apt-get clean' > /tmp/02apt-get-clean
+	echo 'DPkg::Post-Invoke { "rm -f /var/cache/apt/archives/*.deb /var/cache/apt/archives/partial/*.deb /var/cache/apt/*.bin || true"; };' >> /tmp/02apt-get-clean
+	echo 'APT::Update::Post-Invoke { "rm -f /var/cache/apt/archives/*.deb /var/cache/apt/archives/partial/*.deb /var/cache/apt/*.bin || true"; };' >> /tmp/02apt-get-clean
+	echo 'Dir::Cache::pkgcache ""; Dir::Cache::srcpkgcache "";' >> /tmp/02apt-get-clean
+
+	sudo mv /tmp/02apt-get-clean ${tempdir}/etc/apt/apt.conf.d/02apt-get-clean
+
+	#apt: drop translations
+	echo 'Acquire::Languages "none";' > /tmp/02-no-languages
+	sudo mv /tmp/02-no-languages ${tempdir}/etc/apt/apt.conf.d/02-no-languages
+
 	#apt: /var/lib/apt/lists/, store compressed only
-	echo "Acquire::GzipIndexes \"true\";" > /tmp/02compress-indexes
-	echo "Acquire::CompressionTypes::Order:: \"gz\";" >> /tmp/02compress-indexes
+	echo 'Acquire::GzipIndexes "true"; Acquire::CompressionTypes::Order:: "gz";' > /tmp/02compress-indexes
 	sudo mv /tmp/02compress-indexes ${tempdir}/etc/apt/apt.conf.d/02compress-indexes
+
+	#apt: make sure apt-cacher-ng doesn't break oracle-java8-installer
+	echo 'Acquire::http::Proxy::download.oracle.com "DIRECT";' > /tmp/03-proxy-oracle
+	sudo mv /tmp/03-proxy-oracle ${tempdir}/etc/apt/apt.conf.d/03-proxy-oracle
 fi
 
 #set initial 'seed' time...
@@ -247,7 +264,7 @@ echo "#deb-src http://${deb_mirror} ${deb_codename} ${deb_components}" >> ${wfil
 echo "" >> ${wfile}
 
 case "${deb_codename}" in
-jessie|sid)
+stretch|buster|sid)
 	echo "#deb http://${deb_mirror} ${deb_codename}-updates ${deb_components}" >> ${wfile}
 	echo "##deb-src http://${deb_mirror} ${deb_codename}-updates ${deb_components}" >> ${wfile}
 	;;
@@ -271,6 +288,12 @@ wheezy)
 		echo "##deb-src http://ftp.debian.org/debian ${deb_codename}-backports ${deb_components}" >> ${wfile}
 	fi
 	;;
+jessie)
+	echo "" >> ${wfile}
+	echo "#deb http://security.debian.org/ ${deb_codename}/updates ${deb_components}" >> ${wfile}
+	echo "##deb-src http://security.debian.org/ ${deb_codename}/updates ${deb_components}" >> ${wfile}
+	echo "" >> ${wfile}
+	;;
 esac
 
 if [ "x${repo_external}" = "xenable" ] ; then
@@ -286,10 +309,10 @@ if [ "x${repo_rcnee}" = "xenable" ] ; then
 	echo "#" >> ${wfile}
 	echo "#git clone https://github.com/RobertCNelson/linux-stable-rcn-ee" >> ${wfile}
 	echo "#cd ./linux-stable-rcn-ee" >> ${wfile}
-	echo "#git fetch --tags" >> ${wfile}
 	echo "#git checkout \`uname -r\` -b tmp" >> ${wfile}
 	echo "#" >> ${wfile}
 	echo "deb [arch=armhf] http://repos.rcn-ee.net/${deb_distribution}/ ${deb_codename} main" >> ${wfile}
+	echo "#deb-src [arch=armhf] http://repos.rcn-ee.net/${deb_distribution}/ ${deb_codename} main" >> ${wfile}
 
 	sudo cp -v ${OIB_DIR}/target/keyring/repos.rcn-ee.net-archive-keyring.asc ${tempdir}/tmp/repos.rcn-ee.net-archive-keyring.asc
 fi
@@ -343,6 +366,7 @@ echo "distro=${distro}" > /tmp/rcn-ee.conf
 echo "rfs_username=${rfs_username}" >> /tmp/rcn-ee.conf
 echo "release_date=${time}" >> /tmp/rcn-ee.conf
 echo "third_party_modules=${third_party_modules}" >> /tmp/rcn-ee.conf
+echo "abi=${abi}" >> /tmp/rcn-ee.conf
 sudo mv /tmp/rcn-ee.conf ${tempdir}/etc/rcn-ee.conf
 
 cat > ${DIR}/chroot_script.sh <<-__EOF__
@@ -413,7 +437,6 @@ cat > ${DIR}/chroot_script.sh <<-__EOF__
 		if [ ! "x${repo_rcnee_pkg_version}" = "x" ] ; then
 			echo "Log: (chroot) Installing modules for: ${repo_rcnee_pkg_version}"
 			apt-get -y --force-yes install mt7601u-modules-${repo_rcnee_pkg_version} || true
-			apt-get -y --force-yes install ti-sgx-es8-modules-${repo_rcnee_pkg_version} || true
 			depmod -a ${repo_rcnee_pkg_version}
 			update-initramfs -u -k ${repo_rcnee_pkg_version}
 		fi
@@ -684,6 +707,14 @@ cat > ${DIR}/chroot_script.sh <<-__EOF__
 			rm -rf /etc/apt/apt.conf || true
 		fi
 		apt-get clean
+		rm -rf /var/lib/apt/lists/*
+
+		if [ -d /var/cache/ti-c6000-cgt-v8.0.x-installer/ ] ; then
+			rm -rf /var/cache/ti-c6000-cgt-v8.0.x-installer/ || true
+		fi
+		if [ -d /var/cache/ti-pru-cgt-installer/ ] ; then
+			rm -rf /var/cache/ti-pru-cgt-installer/ || true
+		fi
 
 		rm -f /usr/sbin/policy-rc.d
 
@@ -767,8 +798,8 @@ if [ "x${include_firmware}" = "xenable" ] ; then
 fi
 
 chroot_mount
-sudo chroot ${tempdir} /bin/sh chroot_script.sh
-echo "Log: Complete: [sudo chroot ${tempdir} /bin/sh chroot_script.sh]"
+sudo chroot ${tempdir} /bin/sh -e chroot_script.sh
+echo "Log: Complete: [sudo chroot ${tempdir} /bin/sh -e chroot_script.sh]"
 
 if [ ! "x${rfs_opt_scripts}" = "x" ] ; then
 	if [ ! -f ${tempdir}/opt/scripts/.git/config ] ; then
@@ -789,7 +820,7 @@ if [ -n "${chroot_script}" -a -r "${DIR}/target/chroot/${chroot_script}" ] ; the
 	echo "Calling chroot_script script: ${chroot_script}"
 	sudo cp -v ${DIR}/.project ${tempdir}/etc/oib.project
 	sudo cp -v ${DIR}/target/chroot/${chroot_script} ${tempdir}/final.sh
-	sudo chroot ${tempdir} /bin/sh final.sh
+	sudo chroot ${tempdir} /bin/sh -e final.sh
 	sudo rm -f ${tempdir}/final.sh || true
 	sudo rm -f ${tempdir}/etc/oib.project || true
 	chroot_script=""
